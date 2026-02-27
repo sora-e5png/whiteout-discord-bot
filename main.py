@@ -1,112 +1,146 @@
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-import sys
 import os
-import subprocess
+import sys
+import discord
+import sqlite3
+import asyncio
+import requests
+from discord.ext import commands
+from colorama import Fore, Style, init
 
-def check_and_install_requirements():
-    required_packages = {
-        'discord.py': 'discord.py',
-        'colorama': 'colorama',
-        'requests': 'requests',
-        'aiohttp': 'aiohttp',
-        'python-dotenv': 'python-dotenv',
-        'aiohttp-socks': 'aiohttp-socks',
-        'pytz': 'pytz',
-        'pyzipper': 'pyzipper'
-    }
-    
-    def install_package(package_name):
-        try:
-            print(f"Installing {package_name}...")
-            subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
-            print(f"{package_name} installed successfully.")
-            return True
-        except subprocess.CalledProcessError:
-            print(f"Error installing {package_name}.")
-            return False
+# =========================
+# BOT SETUP
+# =========================
 
-    packages_to_install = []
-    try:
-        import pkg_resources
-        installed_packages = {pkg.key for pkg in pkg_resources.working_set}
-    except ImportError:
-        install_package('setuptools')
-        import pkg_resources
-        installed_packages = {pkg.key for pkg in pkg_resources.working_set}
+intents = discord.Intents.default()
+intents.message_content = True
 
-    for package, pip_name in required_packages.items():
-        if package.lower() not in installed_packages:
-            packages_to_install.append(pip_name)
+class CustomBot(commands.Bot):
+    async def on_error(self, event_name, *args, **kwargs):
+        if event_name == "on_interaction":
+            error = sys.exc_info()[1]
+            if isinstance(error, discord.NotFound) and error.code == 10062:
+                return
+        await super().on_error(event_name, *args, **kwargs)
 
-    if packages_to_install:
-        print("Missing libraries detected. Starting installation...")
-        for package in packages_to_install:
-            success = install_package(package)
-            if not success:
-                print(f"Some libraries could not be installed. Please run pip install {package} manually.")
-                sys.exit(1)
-        print("All required libraries installed!")
-        return True
-    return False
+    async def on_command_error(self, ctx, error):
+        if isinstance(error, discord.NotFound) and error.code == 10062:
+            return
+        await super().on_command_error(ctx, error)
+
+bot = CustomBot(command_prefix='/', intents=intents)
+
+init(autoreset=True)
+
+# =========================
+# TOKEN FROM RENDER
+# =========================
+
+TOKEN = os.getenv("TOKEN")
+
+if not TOKEN:
+    print("ERROR: TOKEN not found in environment variables.")
+    exit(1)
+
+# =========================
+# DATABASE SETUP
+# =========================
+
+if not os.path.exists('db'):
+    os.makedirs('db')
+    print(Fore.GREEN + "db folder created" + Style.RESET_ALL)
+
+databases = {
+    "conn_alliance": "db/alliance.sqlite",
+    "conn_giftcode": "db/giftcode.sqlite",
+    "conn_changes": "db/changes.sqlite",
+    "conn_users": "db/users.sqlite",
+    "conn_settings": "db/settings.sqlite",
+}
+
+connections = {name: sqlite3.connect(path) for name, path in databases.items()}
+
+def create_tables():
+    with connections["conn_changes"] as conn_changes:
+        conn_changes.execute('''CREATE TABLE IF NOT EXISTS nickname_changes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            fid INTEGER, 
+            old_nickname TEXT, 
+            new_nickname TEXT, 
+            change_date TEXT
+        )''')
+        conn_changes.execute('''CREATE TABLE IF NOT EXISTS furnace_changes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            fid INTEGER, 
+            old_furnace_lv INTEGER, 
+            new_furnace_lv INTEGER, 
+            change_date TEXT
+        )''')
+
+    with connections["conn_settings"] as conn_settings:
+        conn_settings.execute('''CREATE TABLE IF NOT EXISTS botsettings (
+            id INTEGER PRIMARY KEY, 
+            channelid INTEGER, 
+            giftcodestatus TEXT 
+        )''')
+        conn_settings.execute('''CREATE TABLE IF NOT EXISTS admin (
+            id INTEGER PRIMARY KEY, 
+            is_initial INTEGER
+        )''')
+
+    with connections["conn_users"] as conn_users:
+        conn_users.execute('''CREATE TABLE IF NOT EXISTS users (
+            fid INTEGER PRIMARY KEY, 
+            nickname TEXT, 
+            furnace_lv INTEGER DEFAULT 0, 
+            kid INTEGER, 
+            stove_lv_content TEXT, 
+            alliance TEXT
+        )''')
+
+    with connections["conn_giftcode"] as conn_giftcode:
+        conn_giftcode.execute('''CREATE TABLE IF NOT EXISTS gift_codes (
+            giftcode TEXT PRIMARY KEY, 
+            date TEXT
+        )''')
+
+    with connections["conn_alliance"] as conn_alliance:
+        conn_alliance.execute('''CREATE TABLE IF NOT EXISTS alliancesettings (
+            alliance_id INTEGER PRIMARY KEY, 
+            channel_id INTEGER, 
+            interval INTEGER
+        )''')
+
+    print(Fore.GREEN + "All tables checked." + Style.RESET_ALL)
+
+create_tables()
+
+# =========================
+# LOAD COGS
+# =========================
+
+async def load_cogs():
+    for filename in os.listdir("./cogs"):
+        if filename.endswith(".py"):
+            await bot.load_extension(f"cogs.{filename[:-3]}")
+
+@bot.event
+async def on_ready():
+    print(f"{Fore.GREEN}Logged in as {bot.user}{Style.RESET_ALL}")
+    await bot.tree.sync()
+
+# =========================
+# START BOT
+# =========================
+
+async def main():
+    await load_cogs()
+    await bot.start(TOKEN)
 
 if __name__ == "__main__":
-    check_and_install_requirements()
-    
-    import discord
-    from discord.ext import commands
-    import sqlite3
-    from colorama import Fore, Style, init
-    import requests
-    import asyncio
-    import pkg_resources
-
-    VERSION_URL = "https://raw.githubusercontent.com/Reloisback/Whiteout-Survival-Discord-Bot/refs/heads/main/autoupdateinfo.txt"
-
-    def restart_bot():
-        print(Fore.YELLOW + "\nRestarting bot..." + Style.RESET_ALL)
-        python = sys.executable
-        os.execl(python, python, *sys.argv)
-
-    def setup_version_table():
-        try:
-            with sqlite3.connect('db/settings.sqlite') as conn:
-                cursor = conn.cursor()
-                cursor.execute('''CREATE TABLE IF NOT EXISTS versions (
-                    file_name TEXT PRIMARY KEY,
-                    version TEXT,
-                    is_main INTEGER DEFAULT 0
-                )''')
-                conn.commit()
-                print(Fore.GREEN + "Version table created successfully." + Style.RESET_ALL)
-        except Exception as e:
-            print(Fore.RED + f"Error creating version table: {e}" + Style.RESET_ALL)
-
-    async def check_and_update_files():
-        try:
-            try:
-                response = requests.get(VERSION_URL)
-                if response.status_code == 200:
-                    source_url = "https://raw.githubusercontent.com/Reloisback/Whiteout-Survival-Discord-Bot/refs/heads/main"
-                    print(Fore.GREEN + "Connected to GitHub successfully." + Style.RESET_ALL)
-                else:
-                    raise requests.RequestException
-            except requests.RequestException:
-                print(Fore.YELLOW + "Cannot connect to GitHub, trying alternative source (wosland.com)..." + Style.RESET_ALL)
-                alt_version_url = "https://wosland.com/wosdc/autoupdateinfo.txt"
-                response = requests.get(alt_version_url)
-                if response.status_code == 200:
-                    source_url = "https://wosland.com/wosdc"
-                    print(Fore.GREEN + "Connected to wosland.com successfully." + Style.RESET_ALL)
-                else:
-                    print(Fore.RED + "Failed to connect to both GitHub and wosland.com" + Style.RESET_ALL)
-                    return False
-
-            if not os.path.exists('cogs'):
-                os.makedirs('cogs')
-                print(Fore.GREEN + "cogs folder created" + Style.RESET_ALL)
-
+    asyncio.run(main())
             content = response.text.split('\n')
             documents = {}
             main_py_updated = False
